@@ -176,6 +176,18 @@ private:
 	Block* findBlock(offset_t& offset) const;
 	Firebird::TempFile* setupFile(FB_SIZE_T size);
 
+	// The addressable blocks past the dynamic initial buffer phase, in the
+	// order of the block chain. The blocks are never removed nor moved until
+	// the space dies, the entries only grow, so the starts make the lookup
+	// a binary search. The chain pointers stay for the sequential walks.
+	struct BlockEntry
+	{
+		Block* block;
+		offset_t start;		// the logical offset of the block
+	};
+
+	Firebird::Array<BlockEntry> blockIndex;
+
 	UCHAR* findMemory(offset_t& begin, offset_t end, size_t size) const;
 
 	//  free/used segments management

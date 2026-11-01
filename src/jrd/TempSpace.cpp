@@ -203,7 +203,7 @@ TempSpace::TempSpace(MemoryPool& p, const PathName& prefix, bool dynamic)
 		  logicalSize(0), physicalSize(0), localCacheUsage(0),
 		  head(NULL), tail(NULL), tempFiles(p),
 		  initialBuffer(p), initiallyDynamic(dynamic),
-		  freeSegments(p), freeSegmentsBySize(p)
+		  freeSegments(p), freeSegmentsBySize(p), blockIndex(p)
 {
 	if (!tempDirs)
 	{
@@ -338,6 +338,7 @@ void TempSpace::extend(FB_SIZE_T size)
 {
 	const auto originalLogicalSize = logicalSize;
 	const auto originalPhysicalSize = physicalSize;
+	const FB_SIZE_T originalIndexCount = blockIndex.getCount();
 
 	AutoPtr<Block> originalHead; // Delay deletion and restore in case of error
 	Block* originalTail = tail;
@@ -443,6 +444,21 @@ void TempSpace::extend(FB_SIZE_T size)
 			head = block;
 		}
 		tail = block;
+
+		// index the block: its constructor has already linked it into the
+		// chain, the index must follow the chain exactly. The initial block
+		// stays out of the index - it is resized in place and the pointers
+		// into it do not survive, the switch below replaces the whole index
+
+		offset_t start = 0;
+
+		if (blockIndex.getCount())
+			start = blockIndex.back().start + blockIndex.back().block->size;
+
+		if (initialSize)
+			blockIndex.clear();
+
+		blockIndex.add({block, start});
 	}
 	catch (...)
 	{
@@ -451,6 +467,7 @@ void TempSpace::extend(FB_SIZE_T size)
 		physicalSize = originalPhysicalSize;
 		head = originalHead.release();
 		tail = originalTail;
+		blockIndex.resize(originalIndexCount);
 		throw;
 	}
 }
@@ -465,34 +482,32 @@ TempSpace::Block* TempSpace::findBlock(offset_t& offset) const
 {
 	fb_assert(offset <= logicalSize);
 
-	Block* block = NULL;
+	if (blockIndex.isEmpty())
+	{
+		// the dynamic initial phase: a single in-place resized block
+		// covers the whole space
 
-	if (offset < physicalSize / 2)
-	{
-		// walk forward
-		block = head;
-		while (block && offset >= block->size)
-		{
-			offset -= block->size;
-			block = block->next;
-		}
-		fb_assert(block);
-	}
-	else
-	{
-		// walk backward
-		block = tail;
-		while (block && physicalSize - offset > block->size)
-		{
-			offset += block->size;
-			block = block->prev;
-		}
-		fb_assert(block);
-		offset -= physicalSize - block->size;
+		fb_assert(head == tail && head);
+		return head;
 	}
 
-	fb_assert(offset <= block->size);
-	return block;
+	// binary search over the indexed block starts: the last block whose
+	// start does not exceed the offset
+
+	FB_SIZE_T lo = 0, hi = blockIndex.getCount();
+
+	while (lo + 1 < hi)
+	{
+		const FB_SIZE_T mid = lo + (hi - lo) / 2;
+
+		if (blockIndex[mid].start <= offset)
+			lo = mid;
+		else
+			hi = mid;
+	}
+
+	offset -= blockIndex[lo].start;
+	return blockIndex[lo].block;
 }
 
 //
