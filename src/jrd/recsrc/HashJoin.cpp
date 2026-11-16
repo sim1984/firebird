@@ -113,6 +113,7 @@ class HashJoin::HashTable final : public PermanentStorage
 		Array<ULONG> bucketOffsets;  // size = tableSize + 1; see build() for layout
 		ULONG iterator;              // current cursor for iterate()
 		ULONG tableSize;             // table size for THIS stream
+		ULONG slot;
 
 		explicit Stream(MemoryPool& pool)
 			: PermanentStorage(pool)
@@ -120,6 +121,7 @@ class HashJoin::HashTable final : public PermanentStorage
 			, bucketOffsets(pool)
 			, iterator(0)
 			, tableSize(0)
+			, slot(0)
 		{}
 
 		// Collect one raw entry. No bucket logic here, so this can be
@@ -143,9 +145,19 @@ class HashJoin::HashTable final : public PermanentStorage
 		// written uniformly, without a special case.
 		void build();
 
-		bool bucketEmpty(ULONG hash) const noexcept
+		// Derive the bucket slot of the hash: bucketEmpty(), reset() and
+		// iterate() read the bucket through this cached slot, so the caller
+		// must prime it with the same hash before any of them runs. The
+		// priming lives in the callers (setup() primes every stream once
+		// per hash, the public reset() primes before the search) - deriving
+		// the slot here again would double the modulo
+		void setupSlot(ULONG hash) noexcept
 		{
-			const ULONG slot = hash % tableSize;
+			slot = hash % tableSize;
+		}
+
+		bool bucketEmpty() const noexcept
+		{
 			return bucketOffsets[slot] == bucketOffsets[slot + 1];
 		}
 
@@ -154,7 +166,6 @@ class HashJoin::HashTable final : public PermanentStorage
 		// Returns false if the target is not present in this stream.
 		bool reset(ULONG hash)
 		{
-			const ULONG slot = hash % tableSize;
 			const ULONG end = bucketOffsets[slot + 1];
 
 			ULONG lo = bucketOffsets[slot];
@@ -176,7 +187,6 @@ class HashJoin::HashTable final : public PermanentStorage
 
 		bool iterate(ULONG hash, ULONG& position) noexcept
 		{
-			const ULONG slot = hash % tableSize;
 			const ULONG end = bucketOffsets[slot + 1];
 
 			if (iterator >= end || entries[iterator].hash != hash)
@@ -234,7 +244,9 @@ public:
 	{
 		fb_assert(stream < m_streams.getCount());
 
-		return m_streams[stream]->reset(hash);
+		auto s = m_streams[stream];
+		s->setupSlot(hash);
+		return s->reset(hash);
 	}
 
 	bool iterate(ULONG stream, ULONG hash, ULONG& position) noexcept
@@ -443,7 +455,8 @@ bool HashJoin::HashTable::setup(ULONG hash)
 	// hashes to its own slot, because each has its own table size.
 	for (auto* s : m_streams)
 	{
-		if (s->bucketEmpty(hash))
+		s->setupSlot(hash);
+		if (s->bucketEmpty())
 			return false;
 	}
 
